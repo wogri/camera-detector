@@ -1,0 +1,1 @@
+./hass.sh on
