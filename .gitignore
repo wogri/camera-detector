@@ -27,6 +27,7 @@ go.work.sum
 # env file
 .env
 env
+studio-cam-detector
 
 # Editor/IDE
 # .idea/
