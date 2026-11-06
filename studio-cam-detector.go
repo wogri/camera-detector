@@ -8,6 +8,13 @@ package main
 #include <CoreMediaIO/CMIOHardware.h>
 #include <CoreFoundation/CoreFoundation.h>
 
+// CMIO delivers hardware notifications (device added/removed, etc.) via the main run loop.
+// Without running it, the in-process device list goes stale after sleep or display reconnects.
+// Returns 1 if the run loop had no sources and returned immediately.
+static int PumpRunLoop(double seconds) {
+    return CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, false) == kCFRunLoopRunFinished;
+}
+
 // Get a list of CMIO devices (both audio/video devices may appear). Returns up to maxCount devices.
 static int GetDevices(CMIOObjectID* outDevices, uint32_t maxCount, uint32_t* outCount) {
     CMIOObjectID systemObject = kCMIOObjectSystemObject;
@@ -93,10 +100,43 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 )
+
+func init() {
+	// Keep the main goroutine on the main OS thread so we pump the main CFRunLoop.
+	runtime.LockOSThread()
+}
+
+// waitAndPump runs the main CFRunLoop for d so CMIO can process hardware notifications.
+// It reports whether the system appears to have slept during the wait: Go's monotonic
+// clock on macOS stops during sleep while the wall clock keeps going.
+func waitAndPump(d time.Duration) (slept bool) {
+	start := time.Now()
+	if C.PumpRunLoop(C.double(d.Seconds())) != 0 {
+		time.Sleep(d)
+	}
+	mono := time.Since(start)
+	wall := time.Now().Round(0).Sub(start.Round(0))
+	return wall-mono > 30*time.Second
+}
+
+// restartSelf replaces the process with a fresh instance, which re-enumerates CMIO devices.
+func restartSelf() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot restart after sleep: %v\n", err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "System wake detected, restarting to refresh camera state")
+	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
+		fmt.Fprintf(os.Stderr, "Restart failed: %v\n", err)
+	}
+}
 
 type Device struct {
 	ID       uint32
@@ -139,6 +179,7 @@ func listDevices() ([]Device, error) {
 		var running C.uint
 		if rc := C.GetDeviceIsRunningSomewhere(cDevices[i], &running); rc != 0 {
 			// If this fails, still include the device with Running=false
+			fmt.Fprintf(os.Stderr, "Failed to query running state of %q (code %d)\n", name, int(rc))
 			devs = append(devs, Device{ID: id, Name: name, Running: false, HasVideo: hasVideo != 0})
 			continue
 		}
@@ -285,7 +326,9 @@ func main() {
 			devs, err := listDevices()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error refreshing devices: %v\n", err)
-				time.Sleep(*interval)
+				if waitAndPump(*interval) {
+					restartSelf()
+				}
 				continue
 			}
 
@@ -299,7 +342,9 @@ func main() {
 
 			if !ok {
 				fmt.Fprintf(os.Stderr, "Device disappeared\n")
-				time.Sleep(*interval)
+				if waitAndPump(*interval) {
+					restartSelf()
+				}
 				continue
 			}
 
@@ -315,7 +360,9 @@ func main() {
 				fmt.Printf("%s  [%s]\n", d.Name, state)
 				last = &cur
 			}
-			time.Sleep(*interval)
+			if waitAndPump(*interval) {
+				restartSelf()
+			}
 		}
 	} else {
 		// One-shot
