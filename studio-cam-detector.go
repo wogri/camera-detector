@@ -255,6 +255,8 @@ func executeCommand(command string, deviceName string, state string) {
 
 	// Execute the command using shell
 	execCmd := exec.Command("sh", "-c", cmd)
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
 	if err := execCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error executing command '%s': %v\n", cmd, err)
 	}

@@ -3,7 +3,7 @@
 # hass.sh - A script to manage Home Assistant service
 # requests a single parameter: on or off.
 
-source ./env
+source "$(dirname "${BASH_SOURCE[0]}")/env"
 URL=$HASS/api/services/input_boolean/turn_$1
 
 curl --max-time 2 -X POST \
